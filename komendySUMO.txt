@@ -20,6 +20,30 @@ duarouter -n KatowiceM.net.xml --route-files KatowiceM.trips.xml -o KatowiceM.ro
 
 ALTER
 
+NO PEDESTRIANS AND BIKES:
+
+netconvert --osm-files KatowiceMid.osm --output-file KatowiceMid.net.xml --geometry.remove --roundabouts.guess --ramps.guess --tls.guess-signals --tls.discard-simple --tls.join
+
+___________________________________________
+
+
+netconvert ^
+  --osm-files KatowiceM.osm ^
+  --output-file KatowiceM.net.xml ^
+  --geometry.remove ^
+  --roundabouts.guess ^
+  --ramps.guess ^
+  --junctions.join ^
+  --tls.guess-signals ^
+  --tls.discard-simple ^
+  --tls.join ^
+  --osm.bike-access ^
+  --osm.sidewalks ^
+  --osm.crossings
+
+
+
+
 randomTrips.py -n KatowiceM.net.xml -e 500 --period 1.5 --min-distance 300 --fringe-factor 10 --fringe-threshold 10 --validate -o KatowiceM.rou.xml
 
 

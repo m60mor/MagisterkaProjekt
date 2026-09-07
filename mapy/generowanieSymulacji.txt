@@ -1,0 +1,8 @@
+NO PEDESTRIANS AND BIKES:
+
+netconvert --osm-files KatowiceMid.osm --output-file KatowiceMid.net.xml --geometry.remove --roundabouts.guess --ramps.guess --tls.guess-signals --tls.discard-simple --tls.join
+
+
+python generate_weights.py KatowiceMid.net.xml katowiceMid
+
+randomTrips.py -n KatowiceMid.net.xml -e 500 --period 1.5 --min-distance 300 --fringe-factor 15 --fringe-threshold 10 --validate --weights-prefix katowiceMid -o KatowiceMid.rou.xml
