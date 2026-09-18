@@ -1,0 +1,25 @@
+java -jar josm-tested.jar
+
+
+
+
+NO PEDESTRIANS AND BIKES:
+
+netconvert --osm-files GliwiceMid.osm --output-file GliwiceMid.net.xml --geometry.remove --roundabouts.guess --ramps.guess --tls.guess-signals --tls.discard-simple --tls.join --remove-edges.by-vclass pedestrian,bicycle
+
+
+netconvert --osm-files GliwiceMid.osm --output-file GliwiceMid.net.xml --geometry.remove --roundabouts.guess --ramps.guess --tls.guess-signals --tls.discard-simple --tls.join --remove-edges.by-vclass pedestrian,bicycle --remove-edges.by-type "highway.service,highway.track,highway.path,highway.footway,highway.steps,highway.pedestrian,highway.living_street" --keep-edges.components 1
+
+
+netconvert --osm-files GliwiceMid.osm --output-file GliwiceMid.net.xml --geometry.remove --roundabouts.guess --ramps.guess --tls.guess-signals --tls.discard-simple --tls.join --remove-edges.by-vclass pedestrian,bicycle --ptline.ignore-errors true
+
+
+
+SIM GEN:
+
+randomTrips.py -n GliwiceMid.net.xml -e 500 --period 1.5 --min-distance 300 --fringe-factor 10 --fringe-threshold 10 --validate -o GliwiceMid.rou.xml
+
+
+RUN SIM
+
+sumo-gui -n GliwiceMid.net.xml -r GliwiceMid.rou.xml --no-step-log --start --delay 100

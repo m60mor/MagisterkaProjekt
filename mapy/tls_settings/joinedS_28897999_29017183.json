@@ -1,0 +1,29 @@
+{
+  "tls_id": "joinedS_28897999_29017183",
+  "phases": [
+    {
+      "index": 0,
+      "state": "rrrGGGrrGGGGGrrrrrr",
+      "duration": 20.1,
+      "yellow_fixed": false
+    },
+    {
+      "index": 1,
+      "state": "rrryyyrryyyyyrrrrrr",
+      "duration": 3.0,
+      "yellow_fixed": true
+    },
+    {
+      "index": 2,
+      "state": "GGgrrrGggrrrrGggGGg",
+      "duration": 35.8,
+      "yellow_fixed": false
+    },
+    {
+      "index": 3,
+      "state": "yyyrrryygrrrryyyyyy",
+      "duration": 3.0,
+      "yellow_fixed": true
+    }
+  ]
+}

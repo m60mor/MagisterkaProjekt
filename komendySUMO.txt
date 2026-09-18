@@ -22,7 +22,16 @@ ALTER
 
 NO PEDESTRIANS AND BIKES:
 
+netconvert --osm-files KatowiceMid.osm --output-file KatowiceMid.net.xml --geometry.remove --roundabouts.guess --ramps.guess --tls.guess-signals --tls.discard-simple --tls.join --remove-edges.by-vclass pedestrian,bicycle
+
+
+
+
 netconvert --osm-files KatowiceMid.osm --output-file KatowiceMid.net.xml --geometry.remove --roundabouts.guess --ramps.guess --tls.guess-signals --tls.discard-simple --tls.join
+
+netconvert --osm-files KatowiceMid.osm --output-file KatowiceMid.net.xml --keep-edges.by-vclass passenger --remove-edges.isolated --sidewalks.guess false --crossings.guess false --osm.sidewalks false --osm.crossings false --osm.bike-access false --geometry.remove --roundabouts.guess --ramps.guess --tls.guess-signals --tls.discard-simple --tls.join
+
+netconvert --osm-files KatowiceMid.osm --output-file KatowiceMid.net.xml --keep-edges.by-vclass passenger --remove-edges.isolated --sidewalks.guess false --crossings.guess false --osm.sidewalks false --osm.crossings false --osm.bike-access false --osm.lane-access false --geometry.remove --roundabouts.guess --ramps.guess --tls.guess-signals --tls.discard-simple --tls.join
 
 ___________________________________________
 
@@ -43,7 +52,13 @@ netconvert ^
 
 
 
+randomtrips dla katowiceMid:
+___________________________
+randomTrips.py -n KatowiceMid.net.xml -e 500 --period 1.5 --min-distance 300 --fringe-factor 10 --fringe-threshold 10 --validate -o KatowiceMid.rou.xml
 
+
+randomtrips dla KatowiceM:
+___________________________
 randomTrips.py -n KatowiceM.net.xml -e 500 --period 1.5 --min-distance 300 --fringe-factor 10 --fringe-threshold 10 --validate -o KatowiceM.rou.xml
 
 

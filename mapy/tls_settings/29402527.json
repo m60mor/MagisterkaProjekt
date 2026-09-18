@@ -1,0 +1,29 @@
+{
+  "tls_id": "29402527",
+  "phases": [
+    {
+      "index": 0,
+      "state": "GGGgGrrrr",
+      "duration": 23.1,
+      "yellow_fixed": false
+    },
+    {
+      "index": 1,
+      "state": "yyyyGrrrr",
+      "duration": 3.0,
+      "yellow_fixed": true
+    },
+    {
+      "index": 2,
+      "state": "rrrrGGGGG",
+      "duration": 29.2,
+      "yellow_fixed": false
+    },
+    {
+      "index": 3,
+      "state": "rrrrGyyyy",
+      "duration": 3.0,
+      "yellow_fixed": true
+    }
+  ]
+}

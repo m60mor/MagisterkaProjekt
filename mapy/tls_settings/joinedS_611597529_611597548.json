@@ -1,0 +1,41 @@
+{
+  "tls_id": "joinedS_611597529_611597548",
+  "phases": [
+    {
+      "index": 0,
+      "state": "GrGggrGg",
+      "duration": 35.1,
+      "yellow_fixed": false
+    },
+    {
+      "index": 1,
+      "state": "GrGggryy",
+      "duration": 3.0,
+      "yellow_fixed": true
+    },
+    {
+      "index": 2,
+      "state": "GrGGGrrr",
+      "duration": 10,
+      "yellow_fixed": false
+    },
+    {
+      "index": 3,
+      "state": "yryyGrrr",
+      "duration": 3.0,
+      "yellow_fixed": true
+    },
+    {
+      "index": 4,
+      "state": "rGrrGGrr",
+      "duration": 34.7,
+      "yellow_fixed": false
+    },
+    {
+      "index": 5,
+      "state": "ryrryyrr",
+      "duration": 3.0,
+      "yellow_fixed": true
+    }
+  ]
+}

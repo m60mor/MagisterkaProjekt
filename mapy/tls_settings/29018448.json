@@ -1,0 +1,41 @@
+{
+  "tls_id": "29018448",
+  "phases": [
+    {
+      "index": 0,
+      "state": "GGrrrrrGgg",
+      "duration": 30.6,
+      "yellow_fixed": false
+    },
+    {
+      "index": 1,
+      "state": "yyrrrrrGgg",
+      "duration": 3.0,
+      "yellow_fixed": true
+    },
+    {
+      "index": 2,
+      "state": "rrrrrrrGGG",
+      "duration": 20.4,
+      "yellow_fixed": false
+    },
+    {
+      "index": 3,
+      "state": "rrrrrrryyy",
+      "duration": 3.0,
+      "yellow_fixed": true
+    },
+    {
+      "index": 4,
+      "state": "rrGGGGGrrr",
+      "duration": 13.5,
+      "yellow_fixed": false
+    },
+    {
+      "index": 5,
+      "state": "rryyyyyrrr",
+      "duration": 3.0,
+      "yellow_fixed": true
+    }
+  ]
+}
