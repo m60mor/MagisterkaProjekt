@@ -4,7 +4,7 @@
     {
       "index": 0,
       "state": "GGggrrrrGGggrr",
-      "duration": 18.7,
+      "duration": 47.2,
       "yellow_fixed": false
     },
     {
@@ -16,7 +16,7 @@
     {
       "index": 2,
       "state": "rrGGrrrrrrGGrr",
-      "duration": 21.6,
+      "duration": 10.0,
       "yellow_fixed": false
     },
     {
@@ -28,7 +28,7 @@
     {
       "index": 4,
       "state": "rrrrGGggrrrrGG",
-      "duration": 45.5,
+      "duration": 32.7,
       "yellow_fixed": false
     },
     {
@@ -40,7 +40,7 @@
     {
       "index": 6,
       "state": "rrrrGGGGrrrrrr",
-      "duration": 43.2,
+      "duration": 10.0,
       "yellow_fixed": false
     },
     {

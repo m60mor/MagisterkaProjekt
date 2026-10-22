@@ -1,0 +1,888 @@
+import sys, os, json, math, random, time
+import numpy as np
+
+if "SUMO_HOME" in os.environ:
+    sys.path.append(os.path.join(os.environ["SUMO_HOME"], "tools"))
+else:
+    sys.exit("Please set SUMO_HOME")
+
+import traci
+import sumolib
+
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QComboBox, QSpinBox, QDoubleSpinBox, QPushButton,
+    QTextEdit, QCheckBox, QGroupBox, QFormLayout, QTabWidget, QTableWidget,
+    QTableWidgetItem
+)
+from PySide6.QtCore import QThread, Signal
+
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.figure import Figure
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+NET_FILE = os.path.join(SCRIPT_DIR, "GliwiceMid.net.xml")
+ROUTE_FILE = os.path.join(SCRIPT_DIR, "GliwiceMid.rou.xml")
+DAILY_ROUTE_FILE = os.path.join(SCRIPT_DIR, "GliwiceMid_daily.rou.xml")
+OUTPUT_DIR = os.path.join(SCRIPT_DIR, "tls_settings")
+GUI_SETTINGS_FILE = os.path.join(SCRIPT_DIR, "junction_labels.view.xml")
+STATE_DIR = os.path.join(SCRIPT_DIR, "tmp_states")
+
+DAY_SECONDS = 24 * 3600
+BIN_SECONDS = 15 * 60  # 15 min reporting bins
+
+
+# ============================================================
+# --- gui-settings file: makes sumo-gui show junction IDs automatically ---
+# ============================================================
+
+def write_gui_settings_file(path):
+    content = """<viewsettings>
+    <scheme name="custom"/>
+    <junctions junctionID="1" junctionName="0" internalJunctionName="0" tlsPhaseIndex="0"/>
+</viewsettings>
+"""
+    with open(path, "w") as f:
+        f.write(content)
+
+
+# ============================================================
+# --- SUMO / TLS helpers — accept an explicit connection, default to the
+#     bare `traci` module (single-connection mode, used by normal mode) ---
+# ============================================================
+
+def is_yellow_phase(state):
+    return "y" in state.lower()
+
+
+def classify_phase(state):
+    s = state.lower()
+    if "g" in s:
+        return "green"
+    if s.count("r") == len(s):
+        return "red"
+    return "mixed"
+
+
+def get_car_relevant_tls(net_file, conn=traci):
+    net = sumolib.net.readNet(net_file)
+    car_relevant = []
+    for tls_id in conn.trafficlight.getIDList():
+        tls = net.getTLSSecure(tls_id)
+        incoming_edge_types = {e.getType() for e in tls.getEdges()}
+        if any(not t.startswith("railway") for t in incoming_edge_types):
+            car_relevant.append(tls_id)
+    return car_relevant
+
+
+def build_tls_layout(tls_ids, log, conn=traci):
+    layout = {}
+    offset = 0
+    for tls_id in tls_ids:
+        program = conn.trafficlight.getAllProgramLogics(tls_id)[0]
+        tunable_indices = [i for i, ph in enumerate(program.phases) if not is_yellow_phase(ph.state)]
+        layout[tls_id] = (offset, tunable_indices)
+        offset += len(tunable_indices)
+        log(f"Phases for {tls_id}:")
+        for i, phase in enumerate(program.phases):
+            tag = " (yellow, fixed)" if is_yellow_phase(phase.state) else ""
+            log(f"  [{i}] state={phase.state} duration={phase.duration}{tag}")
+    return layout, offset
+
+
+def build_baseline_vector(layout, tls_ids, conn=traci):
+    dims = sum(len(indices) for _, indices in layout.values())
+    baseline = np.zeros(dims)
+    for tls_id in tls_ids:
+        program = conn.trafficlight.getAllProgramLogics(tls_id)[0]
+        start, tunable_indices = layout[tls_id]
+        for offset, idx in enumerate(tunable_indices):
+            baseline[start + offset] = program.phases[idx].duration
+    return baseline
+
+
+def apply_durations(layout, phase_durations, conn=traci):
+    for tls_id, (start, tunable_indices) in layout.items():
+        durations = phase_durations[start:start + len(tunable_indices)]
+        program = conn.trafficlight.getAllProgramLogics(tls_id)[0]
+        for idx, dur in zip(tunable_indices, durations):
+            program.phases[idx].duration = round(float(dur), 1)
+        conn.trafficlight.setProgramLogic(tls_id, program)
+
+
+def write_tls_settings(layout, phase_durations, net_file, out_dir, log):
+    os.makedirs(out_dir, exist_ok=True)
+    traci.start(["sumo", "-n", net_file, "-r", ROUTE_FILE, "--no-step-log"])
+    for tls_id, (start, tunable_indices) in layout.items():
+        program = traci.trafficlight.getAllProgramLogics(tls_id)[0]
+        durations = phase_durations[start:start + len(tunable_indices)]
+        applied = dict(zip(tunable_indices, durations))
+        phases_out = []
+        for i, phase in enumerate(program.phases):
+            duration = applied.get(i, phase.duration)
+            phases_out.append({
+                "index": i, "state": phase.state,
+                "duration": round(float(duration), 1),
+                "yellow_fixed": is_yellow_phase(phase.state),
+            })
+        settings = {"tls_id": tls_id, "phases": phases_out}
+        path = os.path.join(out_dir, f"{tls_id}.json")
+        with open(path, "w") as f:
+            json.dump(settings, f, indent=2)
+        log(f"Wrote settings for {tls_id} -> {path}")
+    traci.close()
+
+
+def format_time_of_day(seconds):
+    h = int(seconds // 3600) % 24
+    m = int((seconds % 3600) // 60)
+    return f"{h:02d}:{m:02d}"
+
+
+# ============================================================
+# --- Normal-mode: finite simulation runner ---
+# ============================================================
+
+def run_simulation(phase_durations=None, layout=None, route_file=None, gui=False, delay=None, end_time=None):
+    cmd = ["sumo-gui" if gui else "sumo", "-n", NET_FILE, "-r", route_file or ROUTE_FILE, "--no-step-log"]
+    if gui:
+        cmd += ["--start", "--quit-on-end", "--gui-settings-file", GUI_SETTINGS_FILE]
+        if delay:
+            cmd += ["--delay", str(delay)]
+    if end_time:
+        cmd += ["--end", str(end_time)]
+
+    traci.start(cmd)
+    if phase_durations is not None and layout is not None:
+        apply_durations(layout, phase_durations)
+
+    total_wait = 0.0
+    total_speed_samples = 0.0
+    n_speed_samples = 0
+
+    try:
+        while traci.simulation.getMinExpectedNumber() > 0:
+            traci.simulationStep()
+            for veh_id in traci.vehicle.getIDList():
+                total_wait += traci.vehicle.getWaitingTime(veh_id)
+                speed = traci.vehicle.getSpeed(veh_id)
+                if speed > 0.1:
+                    total_speed_samples += speed
+                    n_speed_samples += 1
+    except traci.exceptions.FatalTraCIError:
+        pass
+    finally:
+        try:
+            traci.close()
+        except Exception:
+            pass
+
+    avg_speed = total_speed_samples / n_speed_samples if n_speed_samples else 0.0
+    return total_wait, avg_speed
+
+
+# ============================================================
+# --- Shared algorithm helpers (normal mode) ---
+# ============================================================
+
+def seed_population(n_individuals, dims, bounds, baseline_vector, seed_noise, n_random):
+    lo, hi = bounds
+    population = []
+    for i in range(n_individuals):
+        if i < n_individuals - n_random:
+            ind = baseline_vector + np.random.uniform(-seed_noise, seed_noise, size=dims)
+        else:
+            ind = np.random.uniform(lo, hi, size=dims)
+        population.append(np.clip(ind, lo, hi))
+    return np.array(population)
+
+
+def should_stop(global_best_score, previous_score, same_count, patience=4):
+    if same_count > patience:
+        return True, same_count, previous_score
+    if previous_score == global_best_score:
+        same_count += 1
+    else:
+        same_count = 1
+        previous_score = global_best_score
+    return False, same_count, previous_score
+
+
+def run_pso(evaluate, dims, bounds, baseline_vector, baseline_score, cfg, on_iteration):
+    lo, hi = bounds
+    particles = seed_population(cfg["n"], dims, bounds, baseline_vector, cfg["noise"], cfg["n_random"])
+    velocities = np.zeros((cfg["n"], dims))
+    personal_best = particles.copy()
+    personal_best_score = np.full(cfg["n"], np.inf)
+    global_best, global_best_score = baseline_vector.copy(), baseline_score
+    previous_score, same_count = np.inf, 1
+
+    for it in range(cfg["iterations"]):
+        for i in range(cfg["n"]):
+            score, _ = evaluate(particles[i])
+            if score < personal_best_score[i]:
+                personal_best[i], personal_best_score[i] = particles[i].copy(), score
+            if score < global_best_score:
+                global_best, global_best_score = particles[i].copy(), score
+
+        r1 = np.random.rand(cfg["n"], dims)
+        r2 = np.random.rand(cfg["n"], dims)
+        velocities = 0.5 * velocities + 1.5 * r1 * (personal_best - particles) + 1.5 * r2 * (global_best - particles)
+        particles = np.clip(particles + velocities, lo, hi)
+
+        stop, same_count, previous_score = should_stop(global_best_score, previous_score, same_count)
+        on_iteration(it + 1, cfg["iterations"], global_best_score, global_best)
+        if stop:
+            break
+    return global_best, global_best_score
+
+
+def run_abc(evaluate, dims, bounds, baseline_vector, baseline_score, cfg, on_iteration):
+    lo, hi = bounds
+    n = cfg["n"]
+    food = seed_population(n, dims, bounds, baseline_vector, cfg["noise"], cfg["n_random"])
+    scores = np.array([evaluate(f)[0] for f in food])
+    trials = np.zeros(n, dtype=int)
+    best_idx = int(np.argmin(scores))
+    global_best = food[best_idx].copy() if scores[best_idx] < baseline_score else baseline_vector.copy()
+    global_best_score = min(scores[best_idx], baseline_score)
+    previous_score, same_count = np.inf, 1
+    limit = 5
+
+    for it in range(cfg["iterations"]):
+        for phase in ("employed", "onlooker"):
+            if phase == "onlooker":
+                fitness = 1.0 / (1.0 + scores - scores.min())
+                probs = fitness / fitness.sum()
+                indices = np.random.choice(n, size=n, p=probs)
+            else:
+                indices = range(n)
+            for i in indices:
+                k = np.random.choice([j for j in range(n) if j != i])
+                phi = np.random.uniform(-1, 1, size=dims)
+                candidate = np.clip(food[i] + phi * (food[i] - food[k]), lo, hi)
+                cand_score, _ = evaluate(candidate)
+                if cand_score < scores[i]:
+                    food[i], scores[i], trials[i] = candidate, cand_score, 0
+                else:
+                    trials[i] += 1
+
+        for i in range(n):
+            if trials[i] > limit:
+                food[i] = np.clip(baseline_vector + np.random.uniform(-cfg["noise"], cfg["noise"], size=dims), lo, hi)
+                scores[i], _ = evaluate(food[i])
+                trials[i] = 0
+
+        best_idx = int(np.argmin(scores))
+        if scores[best_idx] < global_best_score:
+            global_best, global_best_score = food[best_idx].copy(), scores[best_idx]
+
+        stop, same_count, previous_score = should_stop(global_best_score, previous_score, same_count)
+        on_iteration(it + 1, cfg["iterations"], global_best_score, global_best)
+        if stop:
+            break
+    return global_best, global_best_score
+
+
+def run_fa(evaluate, dims, bounds, baseline_vector, baseline_score, cfg, on_iteration):
+    lo, hi = bounds
+    n = cfg["n"]
+    fireflies = seed_population(n, dims, bounds, baseline_vector, cfg["noise"], cfg["n_random"])
+    scores = np.array([evaluate(f)[0] for f in fireflies])
+    best_idx = int(np.argmin(scores))
+    global_best = fireflies[best_idx].copy() if scores[best_idx] < baseline_score else baseline_vector.copy()
+    global_best_score = min(scores[best_idx], baseline_score)
+    previous_score, same_count = np.inf, 1
+    alpha, beta0, gamma = 5.0, 1.0, 0.001
+
+    for it in range(cfg["iterations"]):
+        for i in range(n):
+            for j in range(n):
+                if scores[j] < scores[i]:
+                    r2 = np.sum((fireflies[i] - fireflies[j]) ** 2)
+                    beta = beta0 * np.exp(-gamma * r2)
+                    noise = alpha * (np.random.rand(dims) - 0.5)
+                    fireflies[i] = np.clip(fireflies[i] + beta * (fireflies[j] - fireflies[i]) + noise, lo, hi)
+                    scores[i], _ = evaluate(fireflies[i])
+
+        best_idx = int(np.argmin(scores))
+        if scores[best_idx] < global_best_score:
+            global_best, global_best_score = fireflies[best_idx].copy(), scores[best_idx]
+        alpha *= 0.97
+
+        stop, same_count, previous_score = should_stop(global_best_score, previous_score, same_count)
+        on_iteration(it + 1, cfg["iterations"], global_best_score, global_best)
+        if stop:
+            break
+    return global_best, global_best_score
+
+
+def run_aco(evaluate, dims, bounds, baseline_vector, baseline_score, cfg, on_iteration):
+    lo, hi = bounds
+    n = cfg["n"]
+    archive = seed_population(n, dims, bounds, baseline_vector, cfg["noise"], cfg["n_random"])
+    scores = np.array([evaluate(a)[0] for a in archive])
+    order = np.argsort(scores)
+    archive, scores = archive[order], scores[order]
+    global_best = archive[0].copy() if scores[0] < baseline_score else baseline_vector.copy()
+    global_best_score = min(scores[0], baseline_score)
+    q, xi = 0.3, 0.6
+    ranks = np.arange(1, n + 1)
+    weights = (1.0 / (q * n * np.sqrt(2 * np.pi))) * np.exp(-((ranks - 1) ** 2) / (2 * q ** 2 * n ** 2))
+    weights /= weights.sum()
+    previous_score, same_count = np.inf, 1
+
+    for it in range(cfg["iterations"]):
+        new_solutions = []
+        for _ in range(n):
+            chosen = np.random.choice(n, p=weights)
+            sigma = xi * np.sum(np.abs(archive - archive[chosen]), axis=0) / (n - 1 + 1e-9)
+            candidate = np.clip(np.random.normal(archive[chosen], sigma + 1e-6), lo, hi)
+            new_solutions.append(candidate)
+        new_solutions = np.array(new_solutions)
+        new_scores = np.array([evaluate(s)[0] for s in new_solutions])
+
+        combined = np.vstack([archive, new_solutions])
+        combined_scores = np.concatenate([scores, new_scores])
+        order = np.argsort(combined_scores)[:n]
+        archive, scores = combined[order], combined_scores[order]
+
+        if scores[0] < global_best_score:
+            global_best, global_best_score = archive[0].copy(), scores[0]
+
+        stop, same_count, previous_score = should_stop(global_best_score, previous_score, same_count)
+        on_iteration(it + 1, cfg["iterations"], global_best_score, global_best)
+        if stop:
+            break
+    return global_best, global_best_score
+
+
+ALGORITHMS = {"PSO": run_pso, "ABC": run_abc, "FA": run_fa, "ACO": run_aco}
+
+
+# ============================================================
+# --- Normal-mode worker thread (unchanged behavior) ---
+# ============================================================
+
+class BatchOptimizationWorker(QThread):
+    log_signal = Signal(str)
+    progress_signal = Signal(int, int, float)
+    finished_signal = Signal(object, float, float, float)
+
+    def __init__(self, algo_name, n_particles, n_iterations, bound_lo, bound_hi, show_best_each_iter):
+        super().__init__()
+        self.algo_name = algo_name
+        self.cfg = {"n": n_particles, "iterations": n_iterations, "noise": 8.0, "n_random": 2}
+        self.bounds = (bound_lo, bound_hi)
+        self.show_best_each_iter = show_best_each_iter
+
+    def log(self, msg):
+        self.log_signal.emit(str(msg))
+
+    def run(self):
+        try:
+            write_gui_settings_file(GUI_SETTINGS_FILE)
+            traci.start(["sumo", "-n", NET_FILE, "-r", ROUTE_FILE, "--no-step-log"])
+            car_relevant_tls = get_car_relevant_tls(NET_FILE)
+            traci.close()
+            if not car_relevant_tls:
+                self.log("Nie znaleziono sygnalizacji sterujących ruchem samochodowym.")
+                return
+
+            self.log(f"Skrzyżowania: {car_relevant_tls}")
+            traci.start(["sumo", "-n", NET_FILE, "-r", ROUTE_FILE, "--no-step-log"])
+            layout, dims = build_tls_layout(car_relevant_tls, self.log)
+            baseline_vector = build_baseline_vector(layout, car_relevant_tls)
+            traci.close()
+
+            self.log(f"Wymiary przeszukiwania: {dims}")
+            self.log("Uruchamiam symulację bazową...")
+            baseline_wait, baseline_speed = run_simulation()
+            self.log(f"Bazowy całkowity czas oczekiwania: {baseline_wait:.3f}")
+
+            def evaluate(vector):
+                return run_simulation(vector, layout)
+
+            last_shown_score = [baseline_wait]
+
+            def on_iteration(it, total, score, best_vector):
+                self.progress_signal.emit(it, total, score)
+                self.log(f"[{self.algo_name}] Iteracja {it}/{total} — najlepszy wynik: {score:.3f}")
+                if self.show_best_each_iter and score < last_shown_score[0]:
+                    last_shown_score[0] = score
+                    self.log("  -> pokazuję aktualnie najlepszy wynik w sumo-gui...")
+                    run_simulation(best_vector, layout, gui=True, delay=50, end_time=1000)
+
+            algo_func = ALGORITHMS[self.algo_name]
+            best_vector, best_score = algo_func(evaluate, dims, self.bounds, baseline_vector, baseline_wait,
+                                                 self.cfg, on_iteration)
+
+            best_vector = np.round(best_vector, 1)
+            self.log(f"Najlepszy wynik ({self.algo_name}): {best_score:.3f}")
+            write_tls_settings(layout, best_vector, NET_FILE, OUTPUT_DIR, self.log)
+
+            self.log("Uruchamiam finalną symulację (GUI)...")
+            opt_wait, opt_speed = run_simulation(best_vector, layout, gui=True, delay=100)
+            self.log(f"Zoptymalizowany czas oczekiwania: {opt_wait:.3f}, prędkość: {opt_speed*3.6:.3f} km/h")
+
+            self.finished_signal.emit(best_vector, best_score, opt_wait, opt_speed)
+        except Exception as e:
+            self.log(f"BŁĄD: {e}")
+
+
+# ============================================================
+# --- Continuous-mode: route generator (full 24h, two peaks) ---
+# ============================================================
+
+def generate_daily_routes(log):
+    random_trips = os.path.join(os.environ["SUMO_HOME"], "tools", "randomTrips.py")
+    temp_trips = os.path.join(SCRIPT_DIR, "temp_od_pool.trips.xml")
+
+    morning_peak = 8 * 3600
+    afternoon_peak = 16.5 * 3600
+    peak_std = 1.0 * 3600
+    base_rate = 150
+    peak_rate = 800
+    bin_size = 900
+
+    log("Generuję pulę par start-cel (O-D)...")
+    import subprocess
+    subprocess.run([
+        sys.executable, random_trips,
+        "-n", NET_FILE, "-e", "500", "--period", "1.5",
+        "--min-distance", "300", "--fringe-factor", "10", "--fringe-threshold", "10",
+        "-o", temp_trips,
+    ], check=True)
+
+    import re
+    with open(temp_trips) as f:
+        content = f.read()
+    trip_pattern = re.compile(r'<trip id="([^"]+)"[^>]*from="([^"]+)"[^>]*to="([^"]+)"[^>]*/>')
+    od_pool = trip_pattern.findall(content)
+    if not od_pool:
+        raise RuntimeError("Nie udało się wygenerować puli O-D.")
+    log(f"Pula {len(od_pool)} par O-D gotowa.")
+
+    def rate_at(t):
+        morning = (peak_rate - base_rate) * math.exp(-((t - morning_peak) ** 2) / (2 * peak_std ** 2))
+        afternoon = (peak_rate - base_rate) * math.exp(-((t - afternoon_peak) ** 2) / (2 * peak_std ** 2))
+        return base_rate + morning + afternoon
+
+    flows = []
+    flow_id = 0
+    t = 0
+    while t < DAY_SECONDS:
+        bin_end = min(t + bin_size, DAY_SECONDS)
+        rate = rate_at(t + bin_size / 2)
+        _, from_edge, to_edge = random.choice(od_pool)
+        flows.append({"id": f"flow_{flow_id}", "from": from_edge, "to": to_edge,
+                       "begin": t, "end": bin_end, "vehsPerHour": round(rate, 1)})
+        flow_id += 1
+        t = bin_end
+
+    with open(DAILY_ROUTE_FILE, "w") as f:
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n<routes>\n')
+        for fl in flows:
+            f.write(f'    <flow id="{fl["id"]}" from="{fl["from"]}" to="{fl["to"]}" '
+                    f'begin="{fl["begin"]}" end="{fl["end"]}" vehsPerHour="{fl["vehsPerHour"]}"/>\n')
+        f.write('</routes>\n')
+
+    log(f"Zapisano {len(flows)} przedziałów natężenia ruchu do {DAILY_ROUTE_FILE}")
+    log(f"Szczyt poranny: ~{morning_peak/3600:.1f}h, szczyt popołudniowy: ~{afternoon_peak/3600:.1f}h")
+
+
+# ============================================================
+# --- Continuous-mode worker: live day-long sim + online refinement ---
+# ============================================================
+
+class ContinuousWorker(QThread):
+    log_signal = Signal(str)
+    bin_signal = Signal(int, str, float, float)   # bin_index, time_label, avg_wait, avg_speed_kmh
+    finished_signal = Signal()
+
+    def __init__(self, opt_interval, eval_window, n_candidates, perturb_noise, bound_lo, bound_hi):
+        super().__init__()
+        self.opt_interval = opt_interval
+        self.eval_window = eval_window
+        self.n_candidates = n_candidates
+        self.perturb_noise = perturb_noise
+        self.bounds = (bound_lo, bound_hi)
+        self._stop_requested = False
+
+    def log(self, msg):
+        self.log_signal.emit(str(msg))
+
+    def request_stop(self):
+        self._stop_requested = True
+
+    def _evaluate_candidate(self, candidate, layout, state_path, label, warmup_free=0):
+        cmd = ["sumo", "-n", NET_FILE, "-r", DAILY_ROUTE_FILE, "--no-step-log",
+               "--load-state", state_path]
+        traci.start(cmd, label=label)
+        conn = traci.getConnection(label)
+        apply_durations(layout, candidate, conn=conn)
+
+        total_wait = 0.0
+        for _ in range(self.eval_window):
+            conn.simulationStep()
+            for veh_id in conn.vehicle.getIDList():
+                total_wait += conn.vehicle.getWaitingTime(veh_id)
+
+        conn.close()
+        return total_wait
+
+    def run(self):
+        try:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            write_gui_settings_file(GUI_SETTINGS_FILE)
+
+            if not os.path.exists(DAILY_ROUTE_FILE):
+                self.log("Brak pliku tras dziennych — najpierw kliknij 'Generuj trasy dzienne'.")
+                self.finished_signal.emit()
+                return
+
+            lo, hi = self.bounds
+
+            traci.start(["sumo-gui", "-n", NET_FILE, "-r", DAILY_ROUTE_FILE,
+                         "--no-step-log", "--start", "--gui-settings-file", GUI_SETTINGS_FILE],
+                        label="live")
+            live = traci.getConnection("live")
+
+            car_relevant_tls = get_car_relevant_tls(NET_FILE, conn=live)
+            if not car_relevant_tls:
+                self.log("Nie znaleziono sygnalizacji sterujących ruchem samochodowym.")
+                live.close()
+                self.finished_signal.emit()
+                return
+
+            self.log(f"Skrzyżowania: {car_relevant_tls}")
+            layout, dims = build_tls_layout(car_relevant_tls, self.log, conn=live)
+            current_durations = build_baseline_vector(layout, car_relevant_tls, conn=live)
+
+            bin_wait_sum = 0.0
+            bin_speed_sum = 0.0
+            bin_speed_n = 0
+            current_bin = 0
+            next_opt_time = self.opt_interval
+
+            self.log("Rozpoczynam ciągłą symulację 00:00 - 24:00...")
+
+            while not self._stop_requested:
+                live.simulationStep()
+                t = live.simulation.getTime()
+
+                for veh_id in live.vehicle.getIDList():
+                    bin_wait_sum += live.vehicle.getWaitingTime(veh_id)
+                    speed = live.vehicle.getSpeed(veh_id)
+                    if speed > 0.1:
+                        bin_speed_sum += speed
+                        bin_speed_n += 1
+
+                # --- 15-minute reporting bin ---
+                if t >= (current_bin + 1) * BIN_SECONDS:
+                    avg_speed_kmh = (bin_speed_sum / bin_speed_n * 3.6) if bin_speed_n else 0.0
+                    label = format_time_of_day(current_bin * BIN_SECONDS)
+                    self.bin_signal.emit(current_bin, label, bin_wait_sum, avg_speed_kmh)
+                    self.log(f"[{label}] śr. czas oczekiwania (suma): {bin_wait_sum:.1f}, "
+                             f"śr. prędkość: {avg_speed_kmh:.1f} km/h")
+                    bin_wait_sum, bin_speed_sum, bin_speed_n = 0.0, 0.0, 0
+                    current_bin += 1
+
+                # --- periodic online refinement step ---
+                if t >= next_opt_time:
+                    next_opt_time += self.opt_interval
+                    self.log(f"  -> dostrajam światła w t={format_time_of_day(t)}...")
+
+                    state_path = os.path.join(STATE_DIR, f"state_{int(t)}.xml")
+                    live.simulation.saveState(state_path)
+
+                    candidates = [current_durations.copy()]
+                    for _ in range(self.n_candidates - 1):
+                        cand = current_durations + np.random.uniform(-self.perturb_noise, self.perturb_noise, size=dims)
+                        candidates.append(np.clip(cand, lo, hi))
+
+                    scores = []
+                    for i, cand in enumerate(candidates):
+                        try:
+                            score = self._evaluate_candidate(cand, layout, state_path, label=f"cand{i}_{int(t)}")
+                        except Exception as e:
+                            self.log(f"     kandydat {i} nie powiódł się: {e}")
+                            score = float("inf")
+                        scores.append(score)
+
+                    best_idx = int(np.argmin(scores))
+                    if best_idx != 0:
+                        current_durations = candidates[best_idx]
+                        apply_durations(layout, current_durations, conn=live)
+                        self.log(f"     wybrano kandydata {best_idx} (wynik {scores[best_idx]:.1f}) — zastosowano do żywej symulacji")
+                    else:
+                        self.log(f"     obecne ustawienia pozostają najlepsze (wynik {scores[0]:.1f})")
+
+                    try:
+                        os.remove(state_path)
+                    except OSError:
+                        pass
+
+                if t >= DAY_SECONDS:
+                    self.log("Osiągnięto koniec symulowanego dnia (24:00).")
+                    break
+
+            live.close()
+        except traci.exceptions.FatalTraCIError:
+            self.log("Połączenie z sumo-gui zostało przerwane (okno zamknięte ręcznie).")
+        except Exception as e:
+            self.log(f"BŁĄD: {e}")
+        finally:
+            self.finished_signal.emit()
+
+
+# ============================================================
+# --- Main window ---
+# ============================================================
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Optymalizacja sygnalizacji świetlnej — SUMO")
+        self.resize(1000, 750)
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        outer_layout = QVBoxLayout(central)
+
+        self.tabs = QTabWidget()
+        outer_layout.addWidget(self.tabs)
+
+        self.tabs.addTab(self._build_normal_tab(), "Tryb zwykły")
+        self.tabs.addTab(self._build_continuous_tab(), "Tryb ciągły")
+
+        self.batch_worker = None
+        self.continuous_worker = None
+
+    # ---------------- Normal mode tab ----------------
+
+    def _build_normal_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        controls_box = QGroupBox("Parametry")
+        form = QFormLayout()
+
+        self.algo_combo = QComboBox()
+        self.algo_combo.addItems(ALGORITHMS.keys())
+        form.addRow("Algorytm:", self.algo_combo)
+
+        self.n_particles_spin = QSpinBox()
+        self.n_particles_spin.setRange(2, 100)
+        self.n_particles_spin.setValue(10)
+        form.addRow("Liczba osobników:", self.n_particles_spin)
+
+        self.n_iterations_spin = QSpinBox()
+        self.n_iterations_spin.setRange(1, 200)
+        self.n_iterations_spin.setValue(15)
+        form.addRow("Liczba iteracji:", self.n_iterations_spin)
+
+        self.bound_lo_spin = QDoubleSpinBox()
+        self.bound_lo_spin.setRange(1, 300)
+        self.bound_lo_spin.setValue(10)
+        form.addRow("Min. czas fazy (s):", self.bound_lo_spin)
+
+        self.bound_hi_spin = QDoubleSpinBox()
+        self.bound_hi_spin.setRange(1, 300)
+        self.bound_hi_spin.setValue(60)
+        form.addRow("Maks. czas fazy (s):", self.bound_hi_spin)
+
+        self.show_best_checkbox = QCheckBox("Pokazuj najlepszy wynik co iterację (sumo-gui)")
+        self.show_best_checkbox.setChecked(True)
+        form.addRow(self.show_best_checkbox)
+
+        controls_box.setLayout(form)
+        layout.addWidget(controls_box)
+
+        self.start_batch_button = QPushButton("Uruchom optymalizację")
+        self.start_batch_button.clicked.connect(self.start_batch_optimization)
+        layout.addWidget(self.start_batch_button)
+
+        self.batch_figure = Figure(figsize=(5, 3))
+        self.batch_canvas = FigureCanvasQTAgg(self.batch_figure)
+        self.batch_ax = self.batch_figure.add_subplot(111)
+        self.batch_ax.set_xlabel("Iteracja")
+        self.batch_ax.set_ylabel("Całkowity czas oczekiwania")
+        self.batch_scores_x, self.batch_scores_y = [], []
+        layout.addWidget(self.batch_canvas)
+
+        self.batch_log_output = QTextEdit()
+        self.batch_log_output.setReadOnly(True)
+        layout.addWidget(self.batch_log_output)
+
+        return widget
+
+    def batch_log(self, msg):
+        self.batch_log_output.append(msg)
+
+    def start_batch_optimization(self):
+        self.start_batch_button.setEnabled(False)
+        self.batch_log_output.clear()
+        self.batch_scores_x, self.batch_scores_y = [], []
+        self.batch_ax.clear()
+        self.batch_ax.set_xlabel("Iteracja")
+        self.batch_ax.set_ylabel("Całkowity czas oczekiwania")
+        self.batch_canvas.draw()
+
+        self.batch_worker = BatchOptimizationWorker(
+            algo_name=self.algo_combo.currentText(),
+            n_particles=self.n_particles_spin.value(),
+            n_iterations=self.n_iterations_spin.value(),
+            bound_lo=self.bound_lo_spin.value(),
+            bound_hi=self.bound_hi_spin.value(),
+            show_best_each_iter=self.show_best_checkbox.isChecked(),
+        )
+        self.batch_worker.log_signal.connect(self.batch_log)
+        self.batch_worker.progress_signal.connect(self.update_batch_chart)
+        self.batch_worker.finished_signal.connect(self.batch_finished)
+        self.batch_worker.start()
+
+    def update_batch_chart(self, it, total, score):
+        self.batch_scores_x.append(it)
+        self.batch_scores_y.append(score)
+        self.batch_ax.clear()
+        self.batch_ax.plot(self.batch_scores_x, self.batch_scores_y, marker="o")
+        self.batch_ax.set_xlabel("Iteracja")
+        self.batch_ax.set_ylabel("Całkowity czas oczekiwania")
+        self.batch_canvas.draw()
+
+    def batch_finished(self, best_vector, best_score, opt_wait, opt_speed):
+        self.batch_log(f"\n--- Zakończono ---\nNajlepszy wynik: {best_score:.3f}")
+        self.start_batch_button.setEnabled(True)
+
+    # ---------------- Continuous mode tab ----------------
+
+    def _build_continuous_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        controls_box = QGroupBox("Parametry trybu ciągłego")
+        form = QFormLayout()
+
+        self.opt_interval_spin = QSpinBox()
+        self.opt_interval_spin.setRange(60, 7200)
+        self.opt_interval_spin.setValue(900)
+        self.opt_interval_spin.setSuffix(" s")
+        form.addRow("Co ile dostrajać światła:", self.opt_interval_spin)
+
+        self.eval_window_spin = QSpinBox()
+        self.eval_window_spin.setRange(10, 600)
+        self.eval_window_spin.setValue(60)
+        self.eval_window_spin.setSuffix(" s")
+        form.addRow("Okno oceny kandydata:", self.eval_window_spin)
+
+        self.n_candidates_spin = QSpinBox()
+        self.n_candidates_spin.setRange(2, 15)
+        self.n_candidates_spin.setValue(4)
+        form.addRow("Liczba kandydatów:", self.n_candidates_spin)
+
+        self.perturb_noise_spin = QDoubleSpinBox()
+        self.perturb_noise_spin.setRange(0.5, 30.0)
+        self.perturb_noise_spin.setValue(5.0)
+        form.addRow("Siła perturbacji (s):", self.perturb_noise_spin)
+
+        self.cont_bound_lo_spin = QDoubleSpinBox()
+        self.cont_bound_lo_spin.setRange(1, 300)
+        self.cont_bound_lo_spin.setValue(10)
+        form.addRow("Min. czas fazy (s):", self.cont_bound_lo_spin)
+
+        self.cont_bound_hi_spin = QDoubleSpinBox()
+        self.cont_bound_hi_spin.setRange(1, 300)
+        self.cont_bound_hi_spin.setValue(60)
+        form.addRow("Maks. czas fazy (s):", self.cont_bound_hi_spin)
+
+        controls_box.setLayout(form)
+        layout.addWidget(controls_box)
+
+        buttons_row = QHBoxLayout()
+        self.generate_routes_button = QPushButton("Generuj trasy dzienne")
+        self.generate_routes_button.clicked.connect(self.generate_daily_routes_clicked)
+        buttons_row.addWidget(self.generate_routes_button)
+
+        self.start_continuous_button = QPushButton("Uruchom tryb ciągły")
+        self.start_continuous_button.clicked.connect(self.start_continuous)
+        buttons_row.addWidget(self.start_continuous_button)
+
+        self.stop_continuous_button = QPushButton("Zatrzymaj")
+        self.stop_continuous_button.clicked.connect(self.stop_continuous)
+        self.stop_continuous_button.setEnabled(False)
+        buttons_row.addWidget(self.stop_continuous_button)
+
+        layout.addLayout(buttons_row)
+
+        self.day_table = QTableWidget()
+        self.day_table.setColumnCount(3)
+        self.day_table.setHorizontalHeaderLabels(["Godzina", "Suma czasu oczekiwania", "Śr. prędkość (km/h)"])
+        n_bins = DAY_SECONDS // BIN_SECONDS
+        self.day_table.setRowCount(n_bins)
+        for i in range(n_bins):
+            self.day_table.setItem(i, 0, QTableWidgetItem(format_time_of_day(i * BIN_SECONDS)))
+            self.day_table.setItem(i, 1, QTableWidgetItem(""))
+            self.day_table.setItem(i, 2, QTableWidgetItem(""))
+        layout.addWidget(self.day_table)
+
+        self.continuous_log_output = QTextEdit()
+        self.continuous_log_output.setReadOnly(True)
+        self.continuous_log_output.setMaximumHeight(150)
+        layout.addWidget(self.continuous_log_output)
+
+        return widget
+
+    def continuous_log(self, msg):
+        self.continuous_log_output.append(msg)
+
+    def generate_daily_routes_clicked(self):
+        self.generate_routes_button.setEnabled(False)
+        self.continuous_log("Generowanie tras dziennych...")
+        try:
+            generate_daily_routes(self.continuous_log)
+            self.continuous_log("Gotowe.")
+        except Exception as e:
+            self.continuous_log(f"BŁĄD generowania tras: {e}")
+        self.generate_routes_button.setEnabled(True)
+
+    def start_continuous(self):
+        self.start_continuous_button.setEnabled(False)
+        self.stop_continuous_button.setEnabled(True)
+        self.continuous_log_output.clear()
+
+        self.continuous_worker = ContinuousWorker(
+            opt_interval=self.opt_interval_spin.value(),
+            eval_window=self.eval_window_spin.value(),
+            n_candidates=self.n_candidates_spin.value(),
+            perturb_noise=self.perturb_noise_spin.value(),
+            bound_lo=self.cont_bound_lo_spin.value(),
+            bound_hi=self.cont_bound_hi_spin.value(),
+        )
+        self.continuous_worker.log_signal.connect(self.continuous_log)
+        self.continuous_worker.bin_signal.connect(self.update_day_table)
+        self.continuous_worker.finished_signal.connect(self.continuous_finished)
+        self.continuous_worker.start()
+
+    def stop_continuous(self):
+        if self.continuous_worker:
+            self.continuous_worker.request_stop()
+            self.continuous_log("Zatrzymywanie...")
+
+    def update_day_table(self, bin_index, label, total_wait, avg_speed):
+        if 0 <= bin_index < self.day_table.rowCount():
+            self.day_table.setItem(bin_index, 1, QTableWidgetItem(f"{total_wait:.1f}"))
+            self.day_table.setItem(bin_index, 2, QTableWidgetItem(f"{avg_speed:.1f}"))
+            self.day_table.scrollToItem(self.day_table.item(bin_index, 0))
+
+    def continuous_finished(self):
+        self.start_continuous_button.setEnabled(True)
+        self.stop_continuous_button.setEnabled(False)
+        self.continuous_log("Zakończono tryb ciągły.")
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())

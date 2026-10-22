@@ -1,0 +1,65 @@
+{
+  "tls_id": "cluster28897999_29017183",
+  "phases": [
+    {
+      "index": 0,
+      "state": "GGggrrrGGGrrr",
+      "duration": 42.1,
+      "yellow_fixed": false
+    },
+    {
+      "index": 1,
+      "state": "GGggrrryyyrrr",
+      "duration": 3.0,
+      "yellow_fixed": true
+    },
+    {
+      "index": 2,
+      "state": "GGGGrrrrrrrrr",
+      "duration": 10.5,
+      "yellow_fixed": false
+    },
+    {
+      "index": 3,
+      "state": "yyyyrrrrrrrrr",
+      "duration": 3.0,
+      "yellow_fixed": true
+    },
+    {
+      "index": 4,
+      "state": "rrrrrrrrrrrrr",
+      "duration": 10.0,
+      "yellow_fixed": false
+    },
+    {
+      "index": 5,
+      "state": "rrrrGGgrrrGGg",
+      "duration": 37.3,
+      "yellow_fixed": false
+    },
+    {
+      "index": 6,
+      "state": "rrrryygrrryyg",
+      "duration": 3.0,
+      "yellow_fixed": true
+    },
+    {
+      "index": 7,
+      "state": "rrrrrrGrrrrrG",
+      "duration": 12.0,
+      "yellow_fixed": false
+    },
+    {
+      "index": 8,
+      "state": "rrrrrryrrrrry",
+      "duration": 3.0,
+      "yellow_fixed": true
+    },
+    {
+      "index": 9,
+      "state": "rrrrrrrrrrrrr",
+      "duration": 10.0,
+      "yellow_fixed": false
+    }
+  ]
+}

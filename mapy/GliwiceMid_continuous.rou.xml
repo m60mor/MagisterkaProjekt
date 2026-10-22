@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<routes>
+    <flow id="flow_0" from="159233415" to="33264934" begin="0" end="600" vehsPerHour="212.6"/>
+    <flow id="flow_1" from="236860811#1" to="49771634" begin="600" end="1200" vehsPerHour="230.8"/>
+    <flow id="flow_2" from="289075033#0" to="-159233415" begin="1200" end="1800" vehsPerHour="266.9"/>
+    <flow id="flow_3" from="-713730678" to="24229280#3" begin="1800" end="2400" vehsPerHour="330.4"/>
+    <flow id="flow_4" from="-4602430#12" to="-169139305#1" begin="2400" end="3000" vehsPerHour="427.3"/>
+    <flow id="flow_5" from="-76381282#3" to="207636345#0" begin="3000" end="3600" vehsPerHour="554.4"/>
+    <flow id="flow_6" from="47677705#0" to="-159233415" begin="3600" end="4200" vehsPerHour="694.7"/>
+    <flow id="flow_7" from="-4602430#6" to="-207636345#5" begin="4200" end="4800" vehsPerHour="817.7"/>
+    <flow id="flow_8" from="49448111" to="4598860#0" begin="4800" end="5400" vehsPerHour="890.3"/>
+    <flow id="flow_9" from="-306907337" to="33264934" begin="5400" end="6000" vehsPerHour="890.3"/>
+    <flow id="flow_10" from="289075033#0" to="105006192#0" begin="6000" end="6600" vehsPerHour="817.7"/>
+    <flow id="flow_11" from="-104866449#4" to="-417455986#1" begin="6600" end="7200" vehsPerHour="694.7"/>
+    <flow id="flow_12" from="-4602430#6" to="-207636345#5" begin="7200" end="7800" vehsPerHour="554.4"/>
+    <flow id="flow_13" from="-713730678" to="-550872408" begin="7800" end="8400" vehsPerHour="427.3"/>
+    <flow id="flow_14" from="47677705#0" to="207636344" begin="8400" end="9000" vehsPerHour="330.5"/>
+    <flow id="flow_15" from="4629450#0" to="104866449#4" begin="9000" end="9600" vehsPerHour="267.4"/>
+    <flow id="flow_16" from="4632834#9" to="-159233415" begin="9600" end="10200" vehsPerHour="232.3"/>
+    <flow id="flow_17" from="48296255#0" to="-159233415" begin="10200" end="10800" vehsPerHour="217.3"/>
+    <flow id="flow_18" from="-104866449#4" to="-417455986#1" begin="10800" end="11400" vehsPerHour="217.3"/>
+    <flow id="flow_19" from="-48118326#1" to="33264934" begin="11400" end="12000" vehsPerHour="232.3"/>
+    <flow id="flow_20" from="4576736#0" to="4602430#7" begin="12000" end="12600" vehsPerHour="267.4"/>
+    <flow id="flow_21" from="86413568#0" to="265279806#0" begin="12600" end="13200" vehsPerHour="330.5"/>
+    <flow id="flow_22" from="-76381282#3" to="1264331897#0" begin="13200" end="13800" vehsPerHour="427.3"/>
+    <flow id="flow_23" from="105024995" to="4587910#0" begin="13800" end="14400" vehsPerHour="554.4"/>
+    <flow id="flow_24" from="-1413111382#1" to="105006192#0" begin="14400" end="15000" vehsPerHour="694.7"/>
+    <flow id="flow_25" from="105024995" to="4600217#10" begin="15000" end="15600" vehsPerHour="817.7"/>
+    <flow id="flow_26" from="-306907337" to="-4576736#4" begin="15600" end="16200" vehsPerHour="890.3"/>
+    <flow id="flow_27" from="169139305#0" to="86413568#0" begin="16200" end="16800" vehsPerHour="890.3"/>
+    <flow id="flow_28" from="672132052" to="1264331897#0" begin="16800" end="17400" vehsPerHour="817.7"/>
+    <flow id="flow_29" from="86413568#0" to="265279806#0" begin="17400" end="18000" vehsPerHour="694.7"/>
+    <flow id="flow_30" from="-713730678" to="-4576736#4" begin="18000" end="18600" vehsPerHour="554.4"/>
+    <flow id="flow_31" from="-4602430#12" to="26302535#0" begin="18600" end="19200" vehsPerHour="427.3"/>
+    <flow id="flow_32" from="4600217#8" to="203363473" begin="19200" end="19800" vehsPerHour="330.4"/>
+    <flow id="flow_33" from="-105006181#2" to="208439212#0" begin="19800" end="20400" vehsPerHour="266.9"/>
+    <flow id="flow_34" from="-49771634" to="503422512#0" begin="20400" end="21000" vehsPerHour="230.8"/>
+    <flow id="flow_35" from="47677705#0" to="-159233415" begin="21000" end="21600" vehsPerHour="212.6"/>
+    <flow id="flow_36_endless" from="-208439212#1" to="-550872408" begin="21600" end="-1" vehsPerHour="200"/>
+</routes>
