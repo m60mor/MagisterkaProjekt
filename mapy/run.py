@@ -15,7 +15,7 @@ import sumolib
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QSpinBox, QDoubleSpinBox, QPushButton, QTextEdit, QCheckBox,
-    QGroupBox, QFormLayout, QTabWidget, QTableWidget, QTableWidgetItem, QLabel
+    QGroupBox, QFormLayout, QTabWidget, QTableWidget, QTableWidgetItem, QLabel, QMessageBox, QHeaderView
 )
 from PySide6.QtCore import QThread, Signal, Qt, QPointF
 from PySide6.QtGui import (
@@ -45,6 +45,10 @@ DEMAND_MULTIPLIER = 2.0    # mnożnik natężenia ruchu w generatorze tras dzien
 
 # tempo podglądu: ile sekund symulacji przypada na 1 sekundę rzeczywistą (0 = tak szybko, jak się da)
 SPEED_OPTIONS = [("maks.", 0), ("×10", 10), ("×30", 30), ("×60", 60), ("×120", 120), ("×300", 300)]
+
+# sygnalizacja akomodacyjna (wbudowany w SUMO typ "actuated")
+ACT_PROGRAM_ID = "act"
+ACTUATED_ADD_FILE = os.path.join(SCRIPT_DIR, "actuated_tls.add.xml")
 
 
 # ============================================================
@@ -154,6 +158,39 @@ def write_tls_settings(layout, phase_durations, out_dir, log):
             log(f"Wrote settings for {tls_id} -> {path}")
     finally:
         close_conn(conn)
+
+
+def is_actuatable_phase(state):
+    """Faza zielona (z jakimś zielonym, bez żółtego) może być przedłużana/skracana przez detektory."""
+    low = state.lower()
+    return "g" in low and "y" not in low
+
+
+def write_actuated_additional(tls_ids, conn, path, params, log):
+    """Zapisuje plik additional z programem 'actuated' dla każdej sygnalizacji.
+    Fazy i stany są kopiowane z istniejącego programu; fazy zielone dostają zakres minDur-maxDur."""
+    lines = ["<additional>"]
+    for tid in tls_ids:
+        prog = conn.trafficlight.getAllProgramLogics(tid)[0]
+        lines.append(f'    <tlLogic id="{tid}" type="actuated" programID="{ACT_PROGRAM_ID}" offset="0">')
+        lines.append(f'        <param key="max-gap" value="{params["max_gap"]}"/>')
+        lines.append(f'        <param key="detector-gap" value="{params["detector_gap"]}"/>')
+        lines.append(f'        <param key="passing-time" value="{params["passing_time"]}"/>')
+        n_act = 0
+        for ph in prog.phases:
+            d = float(ph.duration)
+            if is_actuatable_phase(ph.state):
+                mn = min(d, max(params["floor"], params["min_pct"] / 100.0 * d))
+                mx = max(d, params["max_pct"] / 100.0 * d)
+                lines.append(f'        <phase duration="{d:.1f}" minDur="{mn:.1f}" maxDur="{mx:.1f}" state="{ph.state}"/>')
+                n_act += 1
+            else:
+                lines.append(f'        <phase duration="{d:.1f}" state="{ph.state}"/>')
+        lines.append("    </tlLogic>")
+        log(f"  {tid}: {n_act} faz akomodacyjnych z {len(prog.phases)}")
+    lines.append("</additional>")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
 
 
 def format_time_of_day(seconds):
@@ -1174,6 +1211,152 @@ class ContinuousWorker(QThread):
             self.finished_signal.emit()
 
 
+def make_day_table(name_a, name_b):
+    table = QTableWidget()
+    table.setColumnCount(7)
+    table.setHorizontalHeaderLabels([
+        "Godzina",
+        f"{name_a}: śr. postój [s/poj.]", f"{name_a}: śr. ruch [s/poj.]", f"{name_a}: śr. prędkość [km/h]",
+        f"{name_b}: śr. postój [s/poj.]", f"{name_b}: śr. ruch [s/poj.]", f"{name_b}: śr. prędkość [km/h]",
+    ])
+    n_bins = DAY_SECONDS // BIN_SECONDS
+    table.setRowCount(n_bins)
+    for i in range(n_bins):
+        table.setItem(i, 0, QTableWidgetItem(format_time_of_day(i * BIN_SECONDS)))
+        for col in range(1, 7):
+            table.setItem(i, col, QTableWidgetItem(""))
+    table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+    return table
+
+
+# ============================================================
+# --- Sygnalizacja akomodacyjna: worker ---
+# ============================================================
+
+class ActuatedWorker(QThread):
+    """Symulacja z sygnalizacją akomodacyjną (detektory, przedłużanie zielonego) obok wersji stałoczasowej."""
+    log_signal = Signal(str)
+    bin_signal = Signal(int, str, object, object)
+    frame_signal = Signal(object, object)      # (klatka akomodacyjnej, klatka stałoczasowej)
+    summary_signal = Signal(object, object)    # statystyki z całego przebiegu
+    finished_signal = Signal()
+
+    def __init__(self, daily, params, speed_factor, tls_candidates):
+        super().__init__()
+        self.daily = daily
+        self.params = params
+        self.speed_factor = speed_factor
+        self.tls_candidates = tls_candidates
+        self._stop_requested = False
+
+    def log(self, msg):
+        self.log_signal.emit(str(msg))
+
+    def request_stop(self):
+        self._stop_requested = True
+
+    def run(self):
+        act = None
+        base = None
+        try:
+            route_file = DAILY_ROUTE_FILE if self.daily else ROUTE_FILE
+            if not os.path.exists(route_file):
+                self.log(f"Brak pliku tras {route_file}"
+                         + (" — kliknij 'Generuj trasy dzienne'." if self.daily else "."))
+                return
+
+            # 1) odczyt istniejących programów i zapis pliku z programem akomodacyjnym
+            setup = start_sumo(["sumo", "-n", NET_FILE, "-r", route_file, "--no-step-log"], "act_setup")
+            try:
+                known = set(setup.trafficlight.getIDList())
+                tls_ids = [t for t in self.tls_candidates if t in known]
+                if not tls_ids:
+                    self.log("Nie znaleziono sygnalizacji sterujących ruchem samochodowym.")
+                    return
+                self.log(f"Skrzyżowania: {tls_ids}")
+                self.log("Program akomodacyjny (fazy zielone dostają zakres min-max):")
+                write_actuated_additional(tls_ids, setup, ACTUATED_ADD_FILE, self.params, self.log)
+            finally:
+                close_conn(setup)
+
+            # 2) dwie symulacje z tym samym ziarnem: akomodacyjna i stałoczasowa
+            act = start_sumo(["sumo", "-n", NET_FILE, "-r", route_file, "-a", ACTUATED_ADD_FILE,
+                              "--no-step-log", "--seed", SIM_SEED], "act")
+            base = start_sumo(["sumo", "-n", NET_FILE, "-r", route_file,
+                               "--no-step-log", "--seed", SIM_SEED], "act_base")
+
+            wrong = []
+            for tid in tls_ids:
+                act.trafficlight.setProgram(tid, ACT_PROGRAM_ID)
+                if act.trafficlight.getProgram(tid) != ACT_PROGRAM_ID:
+                    wrong.append(tid)
+            if wrong:
+                self.log(f"UWAGA: nie udało się włączyć programu akomodacyjnego dla: {wrong}")
+            else:
+                self.log(f"Program akomodacyjny aktywny na {len(tls_ids)} sygnalizacjach.")
+
+            act_tracker = VehicleTracker(act)
+            base_tracker = VehicleTracker(base)
+            pacer = FramePacer(self.speed_factor)
+            act_bin, base_bin = BinStats(), BinStats()
+            act_total, base_total = BinStats(), BinStats()
+            current_bin = 0
+
+            self.log("Rozpoczynam symulację (akomodacyjna + stałoczasowa)...")
+
+            while not self._stop_requested:
+                act.simulationStep()
+                base.simulationStep()
+                t = act.simulation.getTime()
+
+                a_res = act_tracker.update()
+                b_res = base_tracker.update()
+                act_bin.add_from(a_res)
+                act_total.add_from(a_res)
+                base_bin.add_from(b_res)
+                base_total.add_from(b_res)
+
+                if t >= (current_bin + 1) * BIN_SECONDS:
+                    label = format_time_of_day(current_bin * BIN_SECONDS)
+                    a, b = act_bin.summary(), base_bin.summary()
+                    self.bin_signal.emit(current_bin, label, a, b)
+                    self.log(f"[{label}] akomodacyjna: postój {a[0]:.1f}s, ruch {a[1]:.1f}s, {a[2]:.1f} km/h | "
+                             f"stałoczasowa: postój {b[0]:.1f}s, ruch {b[1]:.1f}s, {b[2]:.1f} km/h")
+                    act_bin.reset()
+                    base_bin.reset()
+                    current_bin += 1
+
+                if pacer.due():
+                    self.frame_signal.emit(build_frame(act, a_res, tls_ids, t),
+                                           build_frame(base, b_res, tls_ids, t))
+                pacer.throttle(t)
+
+                if self.daily:
+                    if t >= DAY_SECONDS:
+                        self.log("Osiągnięto koniec symulowanego dnia (24:00).")
+                        break
+                elif (act.simulation.getMinExpectedNumber() <= 0
+                      and base.simulation.getMinExpectedNumber() <= 0):
+                    self.log("Wszystkie pojazdy dotarły do celu.")
+                    break
+
+            # niepełny ostatni przedział (scenariusz zwykły kończy się w dowolnym momencie)
+            if act_bin.vehicles or base_bin.vehicles:
+                a, b = act_bin.summary(), base_bin.summary()
+                self.bin_signal.emit(current_bin, format_time_of_day(current_bin * BIN_SECONDS), a, b)
+            self.summary_signal.emit(act_total.summary(), base_total.summary())
+
+        except traci.exceptions.FatalTraCIError as e:
+            self.log(f"Połączenie z SUMO zostało przerwane: {e}")
+        except Exception as e:
+            self.log(f"BŁĄD: {type(e).__name__}: {e}")
+        finally:
+            for conn in (act, base):
+                if conn is not None:
+                    close_conn(conn)
+            self.finished_signal.emit()
+
+
 # ============================================================
 # --- Okno główne ---
 # ============================================================
@@ -1201,9 +1384,11 @@ class MainWindow(QMainWindow):
         outer_layout.addWidget(self.tabs)
         self.tabs.addTab(self._build_normal_tab(), "Tryb zwykły")
         self.tabs.addTab(self._build_continuous_tab(), "Tryb ciągły")
+        self.tabs.addTab(self._build_actuated_tab(), "Sygnalizacja akomodacyjna")
 
         self.batch_worker = None
         self.continuous_worker = None
+        self.actuated_worker = None
 
     # ---------------- Tryb zwykły ----------------
 
@@ -1282,6 +1467,8 @@ class MainWindow(QMainWindow):
         self.batch_log_output.append(msg)
 
     def start_batch_optimization(self):
+        if self._busy():
+            return
         self.start_batch_button.setEnabled(False)
         self.batch_log_output.clear()
         self._reset_batch_chart()
@@ -1409,19 +1596,7 @@ class MainWindow(QMainWindow):
         views_row.addWidget(self.base_view)
         layout.addLayout(views_row, 3)
 
-        self.day_table = QTableWidget()
-        self.day_table.setColumnCount(7)
-        self.day_table.setHorizontalHeaderLabels([
-            "Godzina",
-            "Optym.: śr. postój [s/poj.]", "Optym.: śr. ruch [s/poj.]", "Optym.: śr. prędkość [km/h]",
-            "Bazowa: śr. postój [s/poj.]", "Bazowa: śr. ruch [s/poj.]", "Bazowa: śr. prędkość [km/h]",
-        ])
-        n_bins = DAY_SECONDS // BIN_SECONDS
-        self.day_table.setRowCount(n_bins)
-        for i in range(n_bins):
-            self.day_table.setItem(i, 0, QTableWidgetItem(format_time_of_day(i * BIN_SECONDS)))
-            for col in range(1, 7):
-                self.day_table.setItem(i, col, QTableWidgetItem(""))
+        self.day_table = make_day_table("Optym.", "Bazowa")
         layout.addWidget(self.day_table, 2)
 
         self.continuous_log_output = QTextEdit()
@@ -1445,6 +1620,8 @@ class MainWindow(QMainWindow):
         self.generate_routes_button.setEnabled(True)
 
     def start_continuous(self):
+        if self._busy():
+            return
         self.start_continuous_button.setEnabled(False)
         self.stop_continuous_button.setEnabled(True)
         self.continuous_log_output.clear()
@@ -1490,6 +1667,194 @@ class MainWindow(QMainWindow):
         self.start_continuous_button.setEnabled(True)
         self.stop_continuous_button.setEnabled(False)
         self.continuous_log("Zakończono tryb ciągły.")
+
+    # ---------------- Sygnalizacja akomodacyjna ----------------
+
+    def _busy(self):
+        """Tylko jeden tryb naraz (traci.start nie jest bezpieczne wątkowo)."""
+        if any(w is not None and w.isRunning()
+               for w in (self.batch_worker, self.continuous_worker, self.actuated_worker)):
+            QMessageBox.information(self, "Zajęte", "Inny tryb jest w trakcie działania. "
+                                                    "Poczekaj na jego zakończenie albo go zatrzymaj.")
+            return True
+        return False
+
+    def _build_actuated_tab(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        controls_box = QGroupBox("Parametry sygnalizacji akomodacyjnej")
+        cols = QHBoxLayout()
+        left, right = QFormLayout(), QFormLayout()
+
+        self.act_scenario_combo = QComboBox()
+        self.act_scenario_combo.addItem("Doba (trasy dzienne)", True)
+        self.act_scenario_combo.addItem("Zwykły (GliwiceMid.rou.xml)", False)
+        left.addRow("Scenariusz ruchu:", self.act_scenario_combo)
+
+        self.act_speed_combo = make_speed_combo(60)
+        left.addRow("Tempo podglądu:", self.act_speed_combo)
+
+        self.act_min_pct_spin = QDoubleSpinBox()
+        self.act_min_pct_spin.setRange(10, 100)
+        self.act_min_pct_spin.setValue(40)
+        self.act_min_pct_spin.setSuffix(" %")
+        left.addRow("Min. zielone (% fazy z sieci):", self.act_min_pct_spin)
+
+        self.act_max_pct_spin = QDoubleSpinBox()
+        self.act_max_pct_spin.setRange(100, 500)
+        self.act_max_pct_spin.setValue(150)
+        self.act_max_pct_spin.setSuffix(" %")
+        left.addRow("Maks. zielone (% fazy z sieci):", self.act_max_pct_spin)
+
+        self.act_floor_spin = QDoubleSpinBox()
+        self.act_floor_spin.setRange(1, 60)
+        self.act_floor_spin.setValue(5)
+        self.act_floor_spin.setSuffix(" s")
+        right.addRow("Min. bezwzględne zielone:", self.act_floor_spin)
+
+        self.act_max_gap_spin = QDoubleSpinBox()
+        self.act_max_gap_spin.setRange(0.5, 15)
+        self.act_max_gap_spin.setValue(3.0)
+        self.act_max_gap_spin.setSuffix(" s")
+        right.addRow("Maks. odstęp pojazdów (max-gap):", self.act_max_gap_spin)
+
+        self.act_detector_gap_spin = QDoubleSpinBox()
+        self.act_detector_gap_spin.setRange(0.5, 15)
+        self.act_detector_gap_spin.setValue(2.0)
+        self.act_detector_gap_spin.setSuffix(" s")
+        right.addRow("Odległość detektora (detector-gap):", self.act_detector_gap_spin)
+
+        self.act_passing_time_spin = QDoubleSpinBox()
+        self.act_passing_time_spin.setRange(0.5, 15)
+        self.act_passing_time_spin.setValue(2.0)
+        self.act_passing_time_spin.setSuffix(" s")
+        right.addRow("Czas przejazdu detektora (passing-time):", self.act_passing_time_spin)
+
+        cols.addLayout(left)
+        cols.addLayout(right)
+        controls_box.setLayout(cols)
+        layout.addWidget(controls_box)
+
+        info = QLabel("Zielone jest przedłużane, dopóki detektory przed sygnalizatorem widzą kolejne pojazdy w odstępie "
+                      "nie większym niż max-gap, ale nie krócej niż min. i nie dłużej niż maks. Gdy ruchu brak, faza "
+                      "kończy się wcześniej. Fazy i kolejność są takie same jak w sieci, bez algorytmów rojowych.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        buttons_row = QHBoxLayout()
+        self.act_generate_button = QPushButton("Generuj trasy dzienne")
+        self.act_generate_button.clicked.connect(self.act_generate_routes_clicked)
+        buttons_row.addWidget(self.act_generate_button)
+        self.act_start_button = QPushButton("Uruchom symulację")
+        self.act_start_button.clicked.connect(self.start_actuated)
+        buttons_row.addWidget(self.act_start_button)
+        self.act_stop_button = QPushButton("Zatrzymaj")
+        self.act_stop_button.clicked.connect(self.stop_actuated)
+        self.act_stop_button.setEnabled(False)
+        buttons_row.addWidget(self.act_stop_button)
+        layout.addLayout(buttons_row)
+
+        self.act_view = NetworkView(self.geom, "Akomodacyjna")
+        self.act_base_view = NetworkView(self.geom, "Stałoczasowa (bazowa)")
+        for v in (self.act_view, self.act_base_view):
+            v.set_tls(self.geom.car_tls_ids)
+        self.act_view.viewChanged.connect(self.act_base_view.set_view)
+        self.act_base_view.viewChanged.connect(self.act_view.set_view)
+        views_row = QHBoxLayout()
+        views_row.addWidget(self.act_view)
+        views_row.addWidget(self.act_base_view)
+        layout.addLayout(views_row, 3)
+
+        self.act_summary_label = QLabel("")
+        self.act_summary_label.setWordWrap(True)
+        layout.addWidget(self.act_summary_label)
+
+        self.act_table = make_day_table("Akomod.", "Stałoczas.")
+        layout.addWidget(self.act_table, 2)
+
+        self.act_log_output = QTextEdit()
+        self.act_log_output.setReadOnly(True)
+        self.act_log_output.setMaximumHeight(110)
+        layout.addWidget(self.act_log_output)
+        return widget
+
+    def act_log(self, msg):
+        self.act_log_output.append(msg)
+
+    def act_generate_routes_clicked(self):
+        self.act_generate_button.setEnabled(False)
+        self.act_log("Generowanie tras dziennych...")
+        QApplication.processEvents()
+        try:
+            generate_daily_routes(self.act_log)
+            self.act_log("Gotowe.")
+        except Exception as e:
+            self.act_log(f"BŁĄD generowania tras: {e}")
+        self.act_generate_button.setEnabled(True)
+
+    def start_actuated(self):
+        if self._busy():
+            return
+        self.act_start_button.setEnabled(False)
+        self.act_stop_button.setEnabled(True)
+        self.act_log_output.clear()
+        self.act_summary_label.setText("")
+        self.act_view.clear_frame()
+        self.act_base_view.clear_frame()
+        for r in range(self.act_table.rowCount()):
+            for c in range(1, 7):
+                self.act_table.item(r, c).setText("")
+
+        params = {
+            "min_pct": self.act_min_pct_spin.value(),
+            "max_pct": self.act_max_pct_spin.value(),
+            "floor": self.act_floor_spin.value(),
+            "max_gap": self.act_max_gap_spin.value(),
+            "detector_gap": self.act_detector_gap_spin.value(),
+            "passing_time": self.act_passing_time_spin.value(),
+        }
+        self.actuated_worker = ActuatedWorker(
+            daily=self.act_scenario_combo.currentData(),
+            params=params,
+            speed_factor=self.act_speed_combo.currentData(),
+            tls_candidates=list(self.geom.car_tls_ids),
+        )
+        self.actuated_worker.log_signal.connect(self.act_log)
+        self.actuated_worker.bin_signal.connect(self.update_act_table)
+        self.actuated_worker.frame_signal.connect(self.update_act_views)
+        self.actuated_worker.summary_signal.connect(self.show_act_summary)
+        self.actuated_worker.finished_signal.connect(self.actuated_finished)
+        self.actuated_worker.start()
+
+    def stop_actuated(self):
+        if self.actuated_worker:
+            self.actuated_worker.request_stop()
+            self.act_log("Zatrzymywanie...")
+
+    def update_act_views(self, act_frame, base_frame):
+        self.act_view.set_frame(act_frame)
+        self.act_base_view.set_frame(base_frame)
+
+    def update_act_table(self, bin_index, label, a, b):
+        if 0 <= bin_index < self.act_table.rowCount():
+            for col_offset, values in ((1, a), (4, b)):
+                for k, value in enumerate(values):
+                    self.act_table.setItem(bin_index, col_offset + k, QTableWidgetItem(f"{value:.1f}"))
+            self.act_table.scrollToItem(self.act_table.item(bin_index, 0))
+
+    def show_act_summary(self, a, b):
+        change = (a[0] - b[0]) / b[0] * 100.0 if b[0] else 0.0
+        text = (f"Cały przebieg — akomodacyjna: postój {a[0]:.1f} s/poj., ruch {a[1]:.1f} s/poj., {a[2]:.1f} km/h  |  "
+                f"stałoczasowa: postój {b[0]:.1f} s/poj., ruch {b[1]:.1f} s/poj., {b[2]:.1f} km/h  |  "
+                f"zmiana średniego postoju: {change:+.1f}%")
+        self.act_summary_label.setText(text)
+        self.act_log(text)
+
+    def actuated_finished(self):
+        self.act_start_button.setEnabled(True)
+        self.act_stop_button.setEnabled(False)
+        self.act_log("Zakończono.")
 
 
 if __name__ == "__main__":

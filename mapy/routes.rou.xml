@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<!-- generated on 2026-10-21 16:18:04.396757 by Eclipse SUMO randomTrips.py v1_27_1+0000-7717f2379d9
+<!-- generated on 2026-10-30 21:51:44.411156 by Eclipse SUMO randomTrips.py v1_27_1+0000-7717f2379d9
 <configuration>
     <net-file value="C:\Users\user\Desktop\MagisterkaProjekt\mapy\GliwiceMid.net.xml"/>
     <output-trip-file value="C:\Users\user\Desktop\MagisterkaProjekt\mapy\temp_od_pool.trips.xml"/>
@@ -12,7 +12,7 @@
 </configuration>
 -->
 
-<!-- generated on 2026-10-21T16:18:04.128779+01:00 by Eclipse SUMO duarouter 1.27.1
+<!-- generated on 2026-10-30T21:51:44.128631+01:00 by Eclipse SUMO duarouter 1.27.1
 <duarouterConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/duarouterConfiguration.xsd">
 
     <input>
