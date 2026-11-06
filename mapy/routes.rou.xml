@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
-<!-- generated on 2026-10-30 21:51:44.411156 by Eclipse SUMO randomTrips.py v1_27_1+0000-7717f2379d9
+<!-- generated on 2026-10-31 15:34:17.196254 by Eclipse SUMO randomTrips.py v1_27_1+0000-7717f2379d9
 <configuration>
     <net-file value="C:\Users\user\Desktop\MagisterkaProjekt\mapy\GliwiceMid.net.xml"/>
-    <output-trip-file value="C:\Users\user\Desktop\MagisterkaProjekt\mapy\temp_od_pool.trips.xml"/>
+    <output-trip-file value="C:\Users\user\Desktop\MagisterkaProjekt\mapy\od_pool.trips.xml"/>
     <fringe-factor value="10"/>
     <fringe-threshold value="10.0"/>
     <min-distance value="300.0"/>
@@ -12,12 +12,12 @@
 </configuration>
 -->
 
-<!-- generated on 2026-10-30T21:51:44.128631+01:00 by Eclipse SUMO duarouter 1.27.1
+<!-- generated on 2026-10-31T15:34:16.928175+01:00 by Eclipse SUMO duarouter 1.27.1
 <duarouterConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/duarouterConfiguration.xsd">
 
     <input>
         <net-file value="C:\Users\user\Desktop\MagisterkaProjekt\mapy\GliwiceMid.net.xml"/>
-        <route-files value="C:\Users\user\Desktop\MagisterkaProjekt\mapy\temp_od_pool.trips.xml"/>
+        <route-files value="C:\Users\user\Desktop\MagisterkaProjekt\mapy\od_pool.trips.xml"/>
     </input>
 
     <output>

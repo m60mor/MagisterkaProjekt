@@ -4,7 +4,7 @@
     {
       "index": 0,
       "state": "GGggrrrGGGrrr",
-      "duration": 42.1,
+      "duration": 32.6,
       "yellow_fixed": false
     },
     {
@@ -16,7 +16,7 @@
     {
       "index": 2,
       "state": "GGGGrrrrrrrrr",
-      "duration": 10.5,
+      "duration": 6.0,
       "yellow_fixed": false
     },
     {
@@ -28,13 +28,13 @@
     {
       "index": 4,
       "state": "rrrrrrrrrrrrr",
-      "duration": 10.0,
+      "duration": 2.0,
       "yellow_fixed": false
     },
     {
       "index": 5,
       "state": "rrrrGGgrrrGGg",
-      "duration": 37.3,
+      "duration": 26.6,
       "yellow_fixed": false
     },
     {
@@ -46,7 +46,7 @@
     {
       "index": 7,
       "state": "rrrrrrGrrrrrG",
-      "duration": 12.0,
+      "duration": 6.0,
       "yellow_fixed": false
     },
     {
@@ -58,7 +58,7 @@
     {
       "index": 9,
       "state": "rrrrrrrrrrrrr",
-      "duration": 10.0,
+      "duration": 1.0,
       "yellow_fixed": false
     }
   ]
